@@ -98,9 +98,9 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
     
 
-class Encoder(nn.Module):
+class PolyLine_Encoder(nn.Module):
     def __init__(self, config: dict) -> None:
-        super(Encoder, self).__init__()
+        super(PolyLine_Encoder, self).__init__()
         self.config = config
        
         self.hidden_dim = config.model.d_model
