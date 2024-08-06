@@ -7,12 +7,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
+from TrajUNet import UNet, WideAndDeep
+from poly_encoder import Polyline_Encoder
+from map_encoder import Map_Encoder
 
 class SparseDispatcher(object):
     def __init__(self, num_experts, gates):
-        """Create a SparseDispatcher."""
         self._gates = gates
         self._num_experts = num_experts
         # sort experts
@@ -36,11 +36,10 @@ class SparseDispatcher(object):
                 torch.split(inp_exp3, self._part_sizes, dim=0)
 
     def combine(self, expert_out, multiply_by_gates=True):
-        # apply exp to expert outputs, so we are not longer in log space
+        # apply exp to expert outputs
         stitched = torch.cat(expert_out, 0)
 
         if multiply_by_gates:
-            #print(stitched.shape, self._nonzero_gates.shape)
             self._nonzero_gates =self._nonzero_gates.unsqueeze(2).expand_as(stitched)
             stitched = stitched.mul(self._nonzero_gates)
         zeros = torch.zeros(self._gates.size(0), expert_out[-1].size(1),expert_out[-1].size(2), requires_grad=True, device=stitched.device)
@@ -60,13 +59,9 @@ class Diff_Expert(nn.Module):
         self.config = config
         self.ch = config.model.ch * 2
         self.attr_dim = config.model.attr_dim
-        #self.guidance_scale = config.model.guidance_scale
-        #self.unet = Model(config)
-        # self.guide_emb = Guide_Embedding(self.attr_dim, self.ch)
-        # self.place_emb = Place_Embedding(self.attr_dim, self.ch)
-        self.map_emb = AutoEncoder(config)
+        self.map_encoder = Map_Encoder(config)
         self.guide_emb = WideAndDeep(self.ch)
-        #self.place_emb = WideAndDeep(self.ch)
+        self.poly_encoder = Polyline_Encoder(config)
         
         self.num_experts = 5
         self.k = 4
@@ -137,7 +132,7 @@ class Diff_Expert(nn.Module):
    
     def forward(self, x, t, attr, interpolate_traj, image_tensor, ports, polylines):
         attr_emb = self.guide_emb(attr)
-        image_emb = self.map_emb.generate(interpolate_traj, image_tensor)
+        image_emb = self.map_eocoder.generate(interpolate_traj, image_tensor)
         poly_emb = self.poly_encoder(ports, polylines).mean(dim=1).repeat(interpolate_traj.shape[0], 1)    
         guide_emb = torch.cat((attr_emb, image_emb, poly_emb), dim=1)
         
