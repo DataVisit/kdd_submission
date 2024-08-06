@@ -18,6 +18,6 @@ This repository contains the code and visualization demo for our paper **"Diff-E
 2. Details about AIS data preprocessing can be found in `code/data_preprocessing` directory.
 
 
-## Visualzaition demo about our proposed vessel trajectory generation methods
+## Visualization demo about our proposed vessel trajectory generation methods
 
 We merged the vessel trajectories from the test set for January 2023 into a single day, and then provided a comparison between the ground-truth and generated results.
