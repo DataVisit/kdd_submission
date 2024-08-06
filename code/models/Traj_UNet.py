@@ -2,79 +2,418 @@
 # -*- coding: utf-8 -*-
 """
 @Project: Diff-expert
-@Name: preprocess.py
+@Name: TrajUNet.py
 """
-from math import sin, cos, sqrt, atan2, radians, asin
-import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
-def resample_trajectory(x, length=200):
-    """
-    Resamples a trajectory to a new length.
+def get_timestep_embedding(timesteps, embedding_dim):
+    assert len(timesteps.shape) == 1
 
-    Parameters:
-        x (np.ndarray): original trajectory, shape (N, 2)
-        length (int): length of resampled trajectory
-
-    Returns:
-        np.ndarray: resampled trajectory, shape (length, 2)
-    """
-    len_x = len(x)
-    time_steps = np.arange(length) * (len_x - 1) / (length - 1)
-    x = x.T
-    resampled_trajectory = np.zeros((2, length))
-    for i in range(2):
-        resampled_trajectory[i] = np.interp(time_steps, np.arange(len_x), x[i])
-    return resampled_trajectory.T
+    half_dim = embedding_dim // 2
+    emb = np.log(10000) / (half_dim - 1)
+    emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb)
+    emb = emb.to(device=timesteps.device)
+    emb = timesteps.float()[:, None] * emb[None, :]
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+    if embedding_dim % 2 == 1:  # zero pad
+        emb = torch.nn.functional.pad(emb, (0, 1, 0, 0))
+    return emb
 
 
-def time_warping(x, length=200):
-    """
-    Resamples a trajectory to a new length.
-    """
-    len_x = len(x)
-    time_steps = np.arange(length) * (len_x - 1) / (length - 1)
-    x = x.T
-    warped_trajectory = np.zeros((2, length))
-    for i in range(2):
-        warped_trajectory[i] = np.interp(time_steps, np.arange(len_x), x[i])
-    return warped_trajectory.T
+class Attention(nn.Module):
+    def __init__(self, embedding_dim):
+        super(Attention, self).__init__()
+        self.fc = nn.Linear(embedding_dim, 1)
+
+    def forward(self, x):
+        # x shape: (batch_size, num_attributes, embedding_dim)
+        weights = self.fc(x)  # shape: (batch_size, num_attributes, 1)
+        # apply softmax along the attributes dimension
+        weights = F.softmax(weights, dim=1)
+        return weights
 
 
-def gather(consts: torch.Tensor, t: torch.Tensor):
-    """
-    Gather consts for $t$ and reshape to feature map shape
-    :param consts: (N, 1, 1)
-    :param t: (N, H, W)
-    :return: (N, H, W)
-    """
-    c = consts.gather(-1, t)
-    return c.reshape(-1, 1, 1)
+class WideAndDeep(nn.Module):
+    def __init__(self, embedding_dim=128, hidden_dim=64):
+        super(WideAndDeep, self).__init__()
+
+        # Wide part (linear model for continuous attributes)
+        self.wide_fc = nn.Linear(8, embedding_dim)
+
+        # Deep part (neural network for categorical attributes)
+        self.type_embedding = nn.Embedding(2, hidden_dim)
+        # Deep part (neural network for categorical attributes)
+        self.hour_embedding = nn.Embedding(24, hidden_dim)
+        self.week_embedding = nn.Embedding(7, hidden_dim)
+        self.month_embedding = nn.Embedding(12, hidden_dim)
+        #self.lid_embedding = nn.Embedding(3658, hidden_dim)
+        self.state_embedding = nn.Embedding(16,hidden_dim)
+        #self.eid_embedding = nn.Embedding(3481, hidden_dim)
+        self.deep_fc1 = nn.Linear(hidden_dim * 6, embedding_dim)
+        self.deep_fc2 = nn.Linear(embedding_dim, embedding_dim)
+
+    def forward(self, attr):
+        # Continuous attributes
+        #type_id, sid,eid, start_hour, end_hour, start_week, end_week, start_month, end_month, start_state, end_state
+        continuous_attrs = attr[:, 8:]
+
+        # Categorical attributes
+        #typeid, sid, eid = attr[:, 0].long(
+        #), attr[:, 1].long(), attr[:, 2].long()
+        
+        typeid = attr[:, 0].long()
+            
+        sh, sw,sm,ss,es = attr[:,3].long(), attr[:,4].long(), attr[:,5].long(), attr[:,6].long(), \
+            attr[:,7].long()
+        
+        
+        # Wide part
+        wide_out = self.wide_fc(continuous_attrs)
+
+        # Deep part
+        type_embed = self.type_embedding(typeid)
+        #sid_embed = self.lid_embedding(sid)
+        #eid_embed = self.lid_embedding(eid)
+        sh_embed, sw_embed,  sm_embed,  ss_embed, es_embed = self.hour_embedding(sh), \
+            self.week_embedding(sw),  self.month_embedding(sm), \
+            self.state_embedding(ss), self.state_embedding(es)
+        
+        
+        categorical_embed = torch.cat(
+            (type_embed,sh_embed, sw_embed, sm_embed, ss_embed, es_embed), dim=1)
+        deep_out = F.relu(self.deep_fc1(categorical_embed))
+        deep_out = self.deep_fc2(deep_out)
+        # Combine wide and deep embeddings
+        combined_embed = wide_out + deep_out
+
+        return combined_embed
 
 
-def q_xt_x0(x0, t, alpha_bar):
-    # get mean and var of xt given x0
-    mean = gather(alpha_bar, t) ** 0.5 * x0
-    var = 1 - gather(alpha_bar, t)
-    # sample xt from q(xt | x0)
-    eps = torch.randn_like(x0).to(x0.device)
-    xt = mean + (var ** 0.5) * eps
-    return xt, eps  # also returns noise
+def nonlinearity(x):
+    # swish
+    return x * torch.sigmoid(x)
 
 
-def compute_alpha(beta, t):
-    beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
-    a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1)
-    return a
+def Normalize(in_channels):
+    return torch.nn.GroupNorm(num_groups=32,
+                              num_channels=in_channels,
+                              eps=1e-6,
+                              affine=True)
 
 
-def p_xt(xt, noise, t, next_t, beta, eta=0):
-    at = compute_alpha(beta, t.long())
-    at_next = compute_alpha(beta, next_t.long())
-    x0_t = (xt - noise * (1 - at).sqrt()) / at.sqrt()
-    c1 = (eta * ((1 - at / at_next) * (1 - at_next) / (1 - at)).sqrt())
-    c2 = ((1 - at_next) - c1 ** 2).sqrt()
-    eps = torch.randn(xt.shape, device=xt.device)
-    xt_next = at_next.sqrt() * x0_t + c1 * eps + c2 * noise
-    return xt_next
+class Upsample(nn.Module):
+    def __init__(self, in_channels, with_conv=True):
+        super().__init__()
+        self.with_conv = with_conv
+        if self.with_conv:
+            self.conv = torch.nn.Conv1d(in_channels,
+                                        in_channels,
+                                        kernel_size=3,
+                                        stride=1,
+                                        padding=1)
+
+    def forward(self, x):
+        x = torch.nn.functional.interpolate(x,
+                                            scale_factor=2.0,
+                                            mode="nearest")
+        if self.with_conv:
+            x = self.conv(x)
+        return x
+
+
+class Downsample(nn.Module):
+    def __init__(self, in_channels, with_conv=True):
+        super().__init__()
+        self.with_conv = with_conv
+        if self.with_conv:
+            # no asymmetric padding in torch conv, must do it ourselves
+            self.conv = torch.nn.Conv1d(in_channels,
+                                        in_channels,
+                                        kernel_size=3,
+                                        stride=2,
+                                        padding=0)
+
+    def forward(self, x):
+        if self.with_conv:
+            pad = (1, 1)
+            x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
+            x = self.conv(x)
+        else:
+            x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
+        return x
+
+
+class ResnetBlock(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels=None,
+                 conv_shortcut=False,
+                 dropout=0.1,
+                 temb_channels=512):
+        super().__init__()
+        self.in_channels = in_channels
+        out_channels = in_channels if out_channels is None else out_channels
+        self.out_channels = out_channels
+        self.use_conv_shortcut = conv_shortcut
+
+        self.norm1 = Normalize(in_channels)
+        self.conv1 = torch.nn.Conv1d(in_channels,
+                                     out_channels,
+                                     kernel_size=3,
+                                     stride=1,
+                                     padding=1)
+        self.temb_proj = torch.nn.Linear(temb_channels, out_channels)
+        self.norm2 = Normalize(out_channels)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.conv2 = torch.nn.Conv1d(out_channels,
+                                     out_channels,
+                                     kernel_size=3,
+                                     stride=1,
+                                     padding=1)
+        if self.in_channels != self.out_channels:
+            if self.use_conv_shortcut:
+                self.conv_shortcut = torch.nn.Conv1d(in_channels,
+                                                     out_channels,
+                                                     kernel_size=3,
+                                                     stride=1,
+                                                     padding=1)
+            else:
+                self.nin_shortcut = torch.nn.Conv1d(in_channels,
+                                                    out_channels,
+                                                    kernel_size=1,
+                                                    stride=1,
+                                                    padding=0)
+
+    def forward(self, x, temb):
+        h = x
+        h = self.norm1(h)
+        h = nonlinearity(h)
+        h = self.conv1(h)
+        h = h + self.temb_proj(nonlinearity(temb))[:, :, None]
+        h = self.norm2(h)
+        h = nonlinearity(h)
+        h = self.dropout(h)
+        h = self.conv2(h)
+
+        if self.in_channels != self.out_channels:
+            if self.use_conv_shortcut:
+                x = self.conv_shortcut(x)
+            else:
+                x = self.nin_shortcut(x)
+
+        return x + h
+
+
+class AttnBlock(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.in_channels = in_channels
+
+        self.norm = Normalize(in_channels)
+        self.q = torch.nn.Conv1d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.k = torch.nn.Conv1d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.v = torch.nn.Conv1d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.proj_out = torch.nn.Conv1d(in_channels,
+                                        in_channels,
+                                        kernel_size=1,
+                                        stride=1,
+                                        padding=0)
+
+    def forward(self, x):
+        h_ = x
+        h_ = self.norm(h_)
+        q = self.q(h_)
+        k = self.k(h_)
+        v = self.v(h_)
+        b, c, w = q.shape
+        q = q.permute(0, 2, 1)  # b,hw,c
+        w_ = torch.bmm(q, k)  # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j]
+        w_ = w_ * (int(c)**(-0.5))
+        w_ = torch.nn.functional.softmax(w_, dim=2)
+        # attend to values
+        w_ = w_.permute(0, 2, 1)  # b,hw,hw (first hw of k, second of q)
+        h_ = torch.bmm(v, w_)
+        h_ = h_.reshape(b, c, w)
+
+        h_ = self.proj_out(h_)
+
+        return x + h_
+
+
+class UNet(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        ch, out_ch, ch_mult = config.model.ch, config.model.out_ch, tuple(
+            config.model.ch_mult)
+        num_res_blocks = config.model.num_res_blocks
+        attn_resolutions = config.model.attn_resolutions
+        dropout = config.model.dropout
+        in_channels = config.model.in_channels
+        resolution = config.data.traj_length
+        resamp_with_conv = config.model.resamp_with_conv
+        num_timesteps = config.diffusion.num_diffusion_timesteps
+
+        if config.model.type == 'bayesian':
+            self.logvar = nn.Parameter(torch.zeros(num_timesteps))
+
+        self.ch = ch
+        self.temb_ch = self.ch * 4
+        self.num_resolutions = len(ch_mult)
+        self.num_res_blocks = num_res_blocks
+        self.resolution = resolution
+        self.in_channels = in_channels
+
+        # timestep embedding
+        self.temb = nn.Module()
+        self.temb.dense = nn.ModuleList([
+            torch.nn.Linear(self.ch, self.temb_ch),
+            torch.nn.Linear(self.temb_ch, self.temb_ch),
+        ])
+
+        # downsampling
+        self.conv_in = torch.nn.Conv1d(in_channels,
+                                       self.ch,
+                                       kernel_size=3,
+                                       stride=1,
+                                       padding=1)
+
+        curr_res = resolution
+        in_ch_mult = (1, ) + ch_mult
+        self.down = nn.ModuleList()
+        block_in = None
+        for i_level in range(self.num_resolutions):
+            block = nn.ModuleList()
+            attn = nn.ModuleList()
+            block_in = ch * in_ch_mult[i_level]
+            block_out = ch * ch_mult[i_level]
+            for i_block in range(self.num_res_blocks):
+                block.append(
+                    ResnetBlock(in_channels=block_in,
+                                out_channels=block_out,
+                                temb_channels=self.temb_ch,
+                                dropout=dropout))
+                block_in = block_out
+                if curr_res in attn_resolutions:
+                    attn.append(AttnBlock(block_in))
+            down = nn.Module()
+            down.block = block
+            down.attn = attn
+            if i_level != self.num_resolutions - 1:
+                down.downsample = Downsample(block_in, resamp_with_conv)
+                curr_res = curr_res // 2
+            self.down.append(down)
+
+        # middle
+        self.mid = nn.Module()
+        self.mid.block_1 = ResnetBlock(in_channels=block_in,
+                                       out_channels=block_in,
+                                       temb_channels=self.temb_ch,
+                                       dropout=dropout)
+        self.mid.attn_1 = AttnBlock(block_in)
+        self.mid.block_2 = ResnetBlock(in_channels=block_in,
+                                       out_channels=block_in,
+                                       temb_channels=self.temb_ch,
+                                       dropout=dropout)
+
+        # upsampling
+        self.up = nn.ModuleList()
+        for i_level in reversed(range(self.num_resolutions)):
+            block = nn.ModuleList()
+            attn = nn.ModuleList()
+            block_out = ch * ch_mult[i_level]
+            skip_in = ch * ch_mult[i_level]
+            for i_block in range(self.num_res_blocks + 1):
+                if i_block == self.num_res_blocks:
+                    skip_in = ch * in_ch_mult[i_level]
+                block.append(
+                    ResnetBlock(in_channels=block_in + skip_in,
+                                out_channels=block_out,
+                                temb_channels=self.temb_ch,
+                                dropout=dropout))
+                block_in = block_out
+                if curr_res in attn_resolutions:
+                    attn.append(AttnBlock(block_in))
+            up = nn.Module()
+            up.block = block
+            up.attn = attn
+            if i_level != 0:
+                up.upsample = Upsample(block_in, resamp_with_conv)
+                curr_res = curr_res * 2
+            self.up.insert(0, up)  # prepend to get consistent order
+
+        # end
+        self.norm_out = Normalize(block_in)
+        self.conv_out = torch.nn.Conv1d(block_in,
+                                        out_ch,
+                                        kernel_size=3,
+                                        stride=1,
+                                        padding=1)
+
+    def forward(self, x, t, extra_embed=None):
+        assert x.shape[2] == self.resolution
+
+        # timestep embedding
+        temb = get_timestep_embedding(t, self.ch)
+        temb = self.temb.dense[0](temb)
+        temb = nonlinearity(temb)
+        temb = self.temb.dense[1](temb)
+        if extra_embed is not None:
+            temb = temb + extra_embed
+
+        # downsampling
+        hs = [self.conv_in(x)]
+        # print(hs[-1].shape)
+        for i_level in range(self.num_resolutions):
+            for i_block in range(self.num_res_blocks):
+                h = self.down[i_level].block[i_block](hs[-1], temb)
+                # print(i_level, i_block, h.shape)
+                if len(self.down[i_level].attn) > 0:
+                    h = self.down[i_level].attn[i_block](h)
+                hs.append(h)
+            if i_level != self.num_resolutions - 1:
+                hs.append(self.down[i_level].downsample(hs[-1]))
+
+        # middle
+        # print(hs[-1].shape)
+        # print(len(hs))
+        h = hs[-1]  # [10, 256, 4, 4]
+        h = self.mid.block_1(h, temb)
+        h = self.mid.attn_1(h)
+        h = self.mid.block_2(h, temb)
+        # print(h.shape)
+        # upsampling
+        for i_level in reversed(range(self.num_resolutions)):
+            for i_block in range(self.num_res_blocks + 1):
+                ht = hs.pop()
+                if ht.size(-1) != h.size(-1):
+                    h = torch.nn.functional.pad(h,
+                                                (0, ht.size(-1) - h.size(-1)))
+                h = self.up[i_level].block[i_block](torch.cat([h, ht], dim=1),
+                                                    temb)
+                # print(i_level, i_block, h.shape)
+                if len(self.up[i_level].attn) > 0:
+                    h = self.up[i_level].attn[i_block](h)
+            if i_level != 0:
+                h = self.up[i_level].upsample(h)
+
+        # end
+        h = self.norm_out(h)
+        h = nonlinearity(h)
+        h = self.conv_out(h)
+        return h
