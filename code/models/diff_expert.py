@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from TrajUNet import UNet, WideAndDeep
-from poly_encoder import Polyline_Encoder
+from polyline_encoder import Polyline_Encoder
 from map_encoder import Map_Encoder
 
 class SparseDispatcher(object):
