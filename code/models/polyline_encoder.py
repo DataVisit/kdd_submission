@@ -2,79 +2,158 @@
 # -*- coding: utf-8 -*-
 """
 @Project: Diff-expert
-@Name: preprocess.py
+@Name: polyline_encoder.py
 """
-from math import sin, cos, sqrt, atan2, radians, asin
-import numpy as np
+
 import torch
+import torch.nn as nn
+import numpy as np
+import torch.nn.functional as F
 
 
-def resample_trajectory(x, length=200):
-    """
-    Resamples a trajectory to a new length.
+class PointEncoder(nn.Module):
+    def __init__(self, config):
+        super(PointEncoder, self).__init__()
+        self.config = config
+        in_dim = config.in_dim
+        out_dim = config.out_dim
+        self.conv1 = nn.Conv1d(in_dim, 64, 1)
+        self.conv2 = nn.Conv1d(64, 128, 1)
+        self.conv3 = nn.Conv1d(128, 1024, 1)
+        self.fc1 = nn.Linear(1024, out_dim)
+        self.fc2 = nn.Linear(out_dim, out_dim)
 
-    Parameters:
-        x (np.ndarray): original trajectory, shape (N, 2)
-        length (int): length of resampled trajectory
+        self.bn1 = nn.BatchNorm1d(64)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.bn3 = nn.BatchNorm1d(1024)
+        self.bn4 = nn.BatchNorm1d(out_dim)
 
-    Returns:
-        np.ndarray: resampled trajectory, shape (length, 2)
-    """
-    len_x = len(x)
-    time_steps = np.arange(length) * (len_x - 1) / (length - 1)
-    x = x.T
-    resampled_trajectory = np.zeros((2, length))
-    for i in range(2):
-        resampled_trajectory[i] = np.interp(time_steps, np.arange(len_x), x[i])
-    return resampled_trajectory.T
+    def forward(self, x):
+        if self.enable_temporal_encoding:
+            x = x + self.temporal_encoding
+
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+
+        x = torch.max(x, 2, keepdim=True)[0]
+
+        x = x.view(-1, 1024)
+        x = F.relu(self.bn4(self.fc1(x)))
+        x = self.fc2(x)
+
+        x = x.view(-1, self.config.out_dim)
+        return x
+
+class MLPPointEncoder(nn.Module):
+    def __init__(self, config):
+        super(MLPPointEncoder, self).__init__()
+        self.config = config
+        in_dim = config.in_dim * 2
+        out_dim = config.out_dim
+        hidden_dim = config.hidden_dim
+        self.n_layers = config.n_hidden_layers
+        self.fc_in = nn.Linear(in_dim, hidden_dim)
+        hidden_layers = []
+        for i in range(self.n_layers):
+            hidden_layers.append(nn.Linear(hidden_dim, hidden_dim))
+            hidden_layers.append(nn.ReLU())
+        self.fc_hidden = nn.Sequential(*hidden_layers)
+        self.fc_out = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, x):
+        B, D, T = x.shape
+       
+        x = x.reshape(B, D*T)
+        x = F.relu(self.fc_in(x))
+        if self.n_layers > 0:
+            x = self.fc_hidden(x)
+        x = self.fc_out(x)
+        return x
+
+class MLP(nn.Module):
+    def __init__(self, config):
+        super(MLP, self).__init__()
+        self.config = config
+        in_dim = config.in_dim
+        out_dim = config.out_dim
+        hidden_dim = config.hidden_dim
+        self.n_layers = config.n_hidden_layers
+        self.fc_in = nn.Linear(in_dim, hidden_dim)
+        hidden_layers = []
+        for i in range(self.n_layers):
+            hidden_layers.append(nn.Linear(hidden_dim, hidden_dim))
+            hidden_layers.append(nn.ReLU())
+        self.fc_hidden = nn.Sequential(*hidden_layers)
+        self.fc_out = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, x):
+        x = F.relu(self.fc_in(x))
+        if self.n_layers > 0:
+            x = self.fc_hidden(x)
+        x = self.fc_out(x)
+        return x
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+
+class Encoder(nn.Module):
+    def __init__(self, config: dict) -> None:
+        super(Encoder, self).__init__()
+        self.config = config
+       
+        self.hidden_dim = config.model.d_model
+        self.harbor_encoder = MLPPointEncoder(config.harbor_encoder)
+        self.poly_encoder = PointEncoder(config.poly_encoder)
+        encoder_layer = nn.TransformerEncoderLayer( \
+            d_model=config.model.d_model, \
+            nhead=config.model.nhead,  \
+            dim_feedforward=config.model.dim_feedforward, \
+            batch_first=True)
+        
+        self.transformer_encoder = nn.TransformerEncoder( \
+            encoder_layer, \
+            num_layers=config.model.num_layers)
+        
+        
+    def _get_the_mask(self, ports: torch.Tensor) -> torch.Tensor:
+        B, N, T, D = ports.shape
+        ports = ports[:,:,:,:2].reshape(B, N, T*2) # (x,y)
+        nan_ports_ind = torch.nonzero(torch.isnan(ports).all(2))
+        nan_ports_mask = torch.zeros((B,N)).to(device).bool()
+        nan_ports_mask[nan_ports_ind[:,0], nan_ports_ind[:,1]] = True 
+        nan_ports_mask = nan_ports_mask.reshape(B, N) 
+        return nan_ports_mask
 
 
-def time_warping(x, length=200):
-    """
-    Resamples a trajectory to a new length.
-    """
-    len_x = len(x)
-    time_steps = np.arange(length) * (len_x - 1) / (length - 1)
-    x = x.T
-    warped_trajectory = np.zeros((2, length))
-    for i in range(2):
-        warped_trajectory[i] = np.interp(time_steps, np.arange(len_x), x[i])
-    return warped_trajectory.T
+    def forward(self, ports, polylines):
+        ports = ports  # (B, N, T, D)
+        polylines = polylines  # (B, Nm, n, D)
 
+        # Generate the masks to ignore NaN values
+        ports_mask = self._get_the_mask(ports)
+        polylines_mask = self._get_the_mask(polylines)
+        src_key_padding_mask = torch.cat([ports_mask, polylines_mask], dim=1)
 
-def gather(consts: torch.Tensor, t: torch.Tensor):
-    """
-    Gather consts for $t$ and reshape to feature map shape
-    :param consts: (N, 1, 1)
-    :param t: (N, H, W)
-    :return: (N, H, W)
-    """
-    c = consts.gather(-1, t)
-    return c.reshape(-1, 1, 1)
+        # Reshape the ports tensor and extract the port types
+        B, N, T, D = ports.shape
+        ports = ports.reshape(B * N, T, D)
+        ports = ports.permute(0, 2, 1) 
+      
+        # Encode the ports
+        ports = self.harbor_encoder(ports) 
+        processed_ports = ports.reshape(B, N, -1)  # (B, N, D)
 
+        polylines = torch.nan_to_num(polylines, nan=0)
+        B, Nm, Np, D = polylines.shape 
+        polylines = polylines.reshape(B*Nm, Np, D)
+        polylines = polylines.permute(0, 2, 1)
+        processed_polylines = self.poly_encoder(polylines) #(B, Nm, D)
+        processed_polylines = processed_polylines.reshape(B, Nm, -1) #(B, Nm, D)
 
-def q_xt_x0(x0, t, alpha_bar):
-    # get mean and var of xt given x0
-    mean = gather(alpha_bar, t) ** 0.5 * x0
-    var = 1 - gather(alpha_bar, t)
-    # sample xt from q(xt | x0)
-    eps = torch.randn_like(x0).to(x0.device)
-    xt = mean + (var ** 0.5) * eps
-    return xt, eps  # also returns noise
-
-
-def compute_alpha(beta, t):
-    beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
-    a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1)
-    return a
-
-
-def p_xt(xt, noise, t, next_t, beta, eta=0):
-    at = compute_alpha(beta, t.long())
-    at_next = compute_alpha(beta, next_t.long())
-    x0_t = (xt - noise * (1 - at).sqrt()) / at.sqrt()
-    c1 = (eta * ((1 - at / at_next) * (1 - at_next) / (1 - at)).sqrt())
-    c2 = ((1 - at_next) - c1 ** 2).sqrt()
-    eps = torch.randn(xt.shape, device=xt.device)
-    xt_next = at_next.sqrt() * x0_t + c1 * eps + c2 * noise
-    return xt_next
+        obs_tokens = torch.cat([processed_ports, processed_polylines], dim=1)
+        encoded_obs = self.transformer_encoder(obs_tokens, src_key_padding_mask=src_key_padding_mask)
+    
+        return encoded_obs
+    
