@@ -94,7 +94,7 @@ class CNNEncoder(nn.Module):
         
 
 
-class AutoEncoder(Module):
+class Map_Encoder(Module):
 
     def __init__(self, config):
         super().__init__()
