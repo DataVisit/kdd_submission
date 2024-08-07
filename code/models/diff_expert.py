@@ -73,7 +73,7 @@ class Diff_Expert(nn.Module):
 
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(1)
-        self.experts = nn.ModuleList([Model(config) for i in range(self.num_experts)])
+        self.experts = nn.ModuleList([UNet(config) for i in range(self.num_experts)])
         self.loss_coef=1e-2
         self.register_buffer("mean", torch.tensor([0.0]))
         self.register_buffer("std", torch.tensor([1.0]))
