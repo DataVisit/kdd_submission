@@ -57,12 +57,12 @@ class CNNEncoder(nn.Module):
                 nn.Conv2d(add_ons_channels, channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)),
                 nn.BatchNorm2d(channel),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(channel, channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)),
-                nn.BatchNorm2d(channel),
+                nn.Conv2d(channel,  self.intial_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)),
+                nn.BatchNorm2d(self.intial_channel),
                 nn.Sigmoid()
             )
         
-        flattened_dim = channel*channel
+        flattened_dim = self.intial_channel*channel
         self.fc1 = nn.Linear(flattened_dim, 256)
         
         
