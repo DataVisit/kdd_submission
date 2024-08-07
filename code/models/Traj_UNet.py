@@ -93,7 +93,6 @@ class WideAndDeep(nn.Module):
 
 
 def nonlinearity(x):
-    # swish
     return x * torch.sigmoid(x)
 
 
