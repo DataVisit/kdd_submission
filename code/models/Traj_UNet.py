@@ -273,7 +273,7 @@ class UNet(nn.Module):
             self.logvar = nn.Parameter(torch.zeros(num_timesteps))
 
         self.ch = ch
-        self.temb_ch = self.ch * 4
+        self.temb_ch = self.ch * 8
         self.num_resolutions = len(ch_mult)
         self.num_res_blocks = num_res_blocks
         self.resolution = resolution
