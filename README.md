@@ -1,4 +1,4 @@
-This repository contains the code and visualization demo for our paper **"Diff-ExpertNet: A Deep Expert Framework Using Conditional Diffusion Models for Vessel Trajectory Generation"** submitted to [KDD] 2025.
+This repository contains the code and visualization demo for our paper **"Diff-ExpertNet: A Deep Expert Framework Using Conditional Diffusion Models for Vessel Trajectory Generation"** submitted to [VLDB] 2025.
 
 
 ## Repository Structure
