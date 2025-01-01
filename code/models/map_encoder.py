@@ -27,11 +27,9 @@ image_tensor = transform(image)#.to(device)
 
 
 class Map_Encoder(nn.Module):
-    def __init__(self, in_channel, size, channel = 128):
+    def __init__(self, in_channel, channel = 128):
  
-        super(CNNEncoder, self).__init__()
-        self.size = size
-    
+        super(CNNEncoder, self).__init__()   
         self.intial_channel = 32
         self.features = nn.Sequential(
             nn.Conv2d(in_channel,self.intial_channel, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)),
