@@ -116,25 +116,9 @@ class Polyline_Encoder(nn.Module):
             encoder_layer, \
             num_layers=config.model.num_layers)
         
-        
-    def _get_the_mask(self, ports: torch.Tensor) -> torch.Tensor:
-        B, N, T, D = ports.shape
-        ports = ports[:,:,:,:2].reshape(B, N, T*2) # (x,y)
-        nan_ports_ind = torch.nonzero(torch.isnan(ports).all(2))
-        nan_ports_mask = torch.zeros((B,N)).to(device).bool()
-        nan_ports_mask[nan_ports_ind[:,0], nan_ports_ind[:,1]] = True 
-        nan_ports_mask = nan_ports_mask.reshape(B, N) 
-        return nan_ports_mask
-
-
     def forward(self, ports, polylines):
         ports = ports  # (B, N, T, D)
         polylines = polylines  # (B, Nm, n, D)
-
-        # Generate the masks to ignore NaN values
-        ports_mask = self._get_the_mask(ports)
-        polylines_mask = self._get_the_mask(polylines)
-        src_key_padding_mask = torch.cat([ports_mask, polylines_mask], dim=1)
 
         # Reshape the ports tensor and extract the port types
         B, N, T, D = ports.shape
@@ -153,7 +137,7 @@ class Polyline_Encoder(nn.Module):
         processed_polylines = processed_polylines.reshape(B, Nm, -1) #(B, Nm, D)
 
         obs_tokens = torch.cat([processed_ports, processed_polylines], dim=1)
-        encoded_obs = self.transformer_encoder(obs_tokens, src_key_padding_mask=src_key_padding_mask)
+        encoded_obs = self.transformer_encoder(obs_tokens)
     
         return encoded_obs
     
