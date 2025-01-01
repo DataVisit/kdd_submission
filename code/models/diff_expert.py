@@ -7,12 +7,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from TrajUNet import UNet, WideAndDeep
+from UNet import UNet, WideAndDeep
 from polyline_encoder import Polyline_Encoder
 from map_encoder import Map_Encoder
 
 class SparseDispatcher(object):
+    
     def __init__(self, num_experts, gates):
+        """Create a SparseDispatcher."""
         self._gates = gates
         self._num_experts = num_experts
         # sort experts
@@ -28,6 +30,7 @@ class SparseDispatcher(object):
         self._nonzero_gates = torch.gather(gates_exp, 1, self._expert_index)
 
     def dispatch(self, inp1, inp2, inp3):
+        # assigns samples to experts whose gate is nonzero
         # expand according to batch index so we can just split by _part_sizes
         inp_exp1 = inp1[self._batch_index]#.squeeze(1)
         inp_exp2 = inp2[self._batch_index]#.squeeze(1)
@@ -36,10 +39,10 @@ class SparseDispatcher(object):
                 torch.split(inp_exp3, self._part_sizes, dim=0)
 
     def combine(self, expert_out, multiply_by_gates=True):
-        # apply exp to expert outputs
+        # apply exp to expert outputs, so we are not longer in log space
         stitched = torch.cat(expert_out, 0)
-
         if multiply_by_gates:
+            #print(stitched.shape, self._nonzero_gates.shape)
             self._nonzero_gates =self._nonzero_gates.unsqueeze(2).expand_as(stitched)
             stitched = stitched.mul(self._nonzero_gates)
         zeros = torch.zeros(self._gates.size(0), expert_out[-1].size(1),expert_out[-1].size(2), requires_grad=True, device=stitched.device)
@@ -53,21 +56,20 @@ class SparseDispatcher(object):
     
     
 
-class Diff_Expert(nn.Module):
+class Guide_UNet(nn.Module):
     def __init__(self, config):
-        super(Diff_Expert, self).__init__()
+        super(Guide_UNet, self).__init__()
         self.config = config
         self.ch = config.model.ch * 2
         self.attr_dim = config.model.attr_dim
-        self.map_encoder = Map_Encoder(config)
         self.guide_emb = WideAndDeep(self.ch)
-        self.poly_encoder = Polyline_Encoder(config)
+        self.conv = Map_Encoder(in_channel=1, size= image_size)
         
         self.num_experts = 5
         self.k = 4
         self.noisy_gating = True
-
-        self.input_size = self.ch*2
+        self.poly_encoder = Polyline_Encoder(config)
+        self.input_size = config.model.ch * 6
         self.w_gate = nn.Parameter(torch.zeros(self.input_size, self.num_experts), requires_grad=True)
         self.w_noise = nn.Parameter(torch.zeros(self.input_size, self.num_experts), requires_grad=True)
 
@@ -103,11 +105,12 @@ class Diff_Expert(nn.Module):
             load = self._gates_to_load(gates)
         return gates, load
     def cv_squared(self, x):
-        eps = 1e-10
-        # if only num_experts = 1
-        if x.shape[0] == 1:
-            return torch.tensor([0], device=x.device, dtype=x.dtype)
-        return x.float().var() / (x.float().mean()**2 + eps)
+            eps = 1e-10
+            # if only num_experts = 1
+
+            if x.shape[0] == 1:
+                return torch.tensor([0], device=x.device, dtype=x.dtype)
+            return x.float().var() / (x.float().mean()**2 + eps)
 
     def _gates_to_load(self, gates):
         return (gates > 0).sum(0)
@@ -129,25 +132,24 @@ class Diff_Expert(nn.Module):
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
 
-   
-    def forward(self, x, t, attr, interpolate_traj, image_tensor, ports, polylines):
+    def forward(self, x, t, attr, fused_map, polylines, ports):
         attr_emb = self.guide_emb(attr)
-        image_emb = self.map_eocoder.generate(interpolate_traj, image_tensor)
-        poly_emb = self.poly_encoder(ports, polylines).mean(dim=1).repeat(interpolate_traj.shape[0], 1)    
+        image_emb , p_x = self.conv(fused_map)
+        #print("image", image_emb.shape)
+        poly_emb = self.poly_encoder(polylines ,ports).mean(dim=1)
         guide_emb = torch.cat((attr_emb, image_emb, poly_emb), dim=1)
         
         gates, load = self.noisy_top_k_gating(guide_emb, self.training)
         choices = gates
         # calculate importance loss
         importance = gates.sum(0)
-
+        #
         loss = self.cv_squared(importance) + self.cv_squared(load)
         loss *= self.loss_coef
 
         dispatcher = SparseDispatcher(self.num_experts, gates)
         expert_inputs_x, expert_inputs_t, expert_inputs_g = dispatcher.dispatch(x,t,guide_emb)
         gates = dispatcher.expert_to_gates()
-        
-        expert_outputs = [self.experts[i](expert_inputs_x[i], expert_inputs_t[i], expert_inputs_g[i]) for i in range(self.num_experts)]
+        expert_outputs = [self.experts[i](expert_inputs_x[i], expert_inputs_t[i], expert_inputs_g[i]) for i in range(self.num_experts)]   
         y = dispatcher.combine(expert_outputs)
-        return y, loss, choices 
+        return y, loss, p_x
