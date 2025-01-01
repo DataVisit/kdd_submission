@@ -63,7 +63,7 @@ class Guide_UNet(nn.Module):
         self.ch = config.model.ch * 2
         self.attr_dim = config.model.attr_dim
         self.guide_emb = WideAndDeep(self.ch)
-        self.conv = Map_Encoder(in_channel=1, size= image_size)
+        self.conv = Map_Encoder(in_channel=1)
         
         self.num_experts = 5
         self.k = 4
