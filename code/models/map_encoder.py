@@ -15,7 +15,7 @@ import torch.nn.functional as F
 transform = transforms.Compose([
         transforms.ToTensor()
     ])
-image_size = (180, 330)
+image_size = (90, 165)
 image_path = "MAP.png"
 image = Image.open(image_path).convert("L") 
 resize_transform = transforms.Resize(image_size)
@@ -26,7 +26,7 @@ image_tensor = transform(image)#.to(device)
 
 
 
-class CNNEncoder(nn.Module):
+class Map_Encoder(nn.Module):
     def __init__(self, in_channel, size, channel = 128):
  
         super(CNNEncoder, self).__init__()
@@ -63,7 +63,7 @@ class CNNEncoder(nn.Module):
             )
         
         flattened_dim = self.intial_channel*channel
-        self.fc1 = nn.Linear(flattened_dim, 256)
+        self.fc1 = nn.Linear(flattened_dim, 128)
         
         
     def scale(self, x, dim):
@@ -94,64 +94,4 @@ class CNNEncoder(nn.Module):
         
 
 
-class Map_Encoder(Module):
 
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.image_size = (180, 330)
-        self.x_range = config.map.lat_range
-        self.y_range = config.map.lon_range
-        self.encoder_dim = 128
-        self.conv = CNNEncoder(in_channel=1, size= self.image_size)
-
-    
-    def generate(self, batch, image_tensor):
-        image_map = image_tensor
-        heat_map = self.generate_heatmap(batch, self.image_size, self.x_range, self.y_range)
-        map_x_encoded = self.fuse_maps(image_map, heat_map)
-        return map_x_encoded
-
-
-    def generate_heatmap(self, x_t, image_size, x_range, y_range):
-        x_scale = image_size[0] / (x_range[1] - x_range[0])
-        y_scale = image_size[1] / (y_range[1] - y_range[0])
-
-        x_pixel = image_size[0] - ((x_t[:, :, 0] - x_range[0]) * x_scale).long()
-        y_pixel = ((x_t[:, :, 1] - y_range[0]) * y_scale).long()
-
-        valid_indices = (~torch.isnan(x_t[:, :, 0])) & (~torch.isnan(x_t[:, :, 1]))
-        heatmap = torch.zeros(x_t.shape[0], *image_size)
-
-        size = 36
-        sigma = 3.0
-        kernel = torch.exp(-torch.arange(-size // 2, size // 2 + 1).float() ** 2 / (2 * sigma ** 2))
-        kernel = kernel[:, None] * kernel[None, :]
-        kernel = kernel / kernel.sum()
-
-
-        for i in range(x_t.shape[1]):
-            for b in range(x_t.shape[0]):
-                if not valid_indices[b, i]:
-                    continue
-
-                x_start = torch.clamp(x_pixel[b, i] - size // 2, 0, image_size[0] - size)
-                y_start = torch.clamp(y_pixel[b, i] - size // 2, 0, image_size[1] - size)
-                x_end = torch.clamp(x_pixel[b, i] + size // 2, 0, image_size[0])
-                y_end = torch.clamp(y_pixel[b, i] + size // 2, 0, image_size[1])
-
-                kernel_size_x = x_end - x_start
-                kernel_size_y = y_end - y_start
-                adjusted_kernel = kernel[:kernel_size_x, :kernel_size_y]
-                heatmap[b, x_start:x_end, y_start:y_end] += adjusted_kernel
-
-        max1, _ = heatmap.max(dim=1, keepdim=True)
-        max2, _ = max1.max(dim=2, keepdim=True)
-        heatmap = heatmap / (max2 + 1e-10)
-        return heatmap
-
-    def fuse_maps(self, image_map, heat_map, alpha=0.7):
-        fused_map = alpha * heat_map + (1 - alpha) * image_map
-        input = fused_map.unsqueeze(1).to(device)
-        map_x_encoded, p_x = self.conv(input)
-        return map_x_encoded
